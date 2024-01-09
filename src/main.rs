@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, time::Duration, error::Error, path::Path, fs::File, io, str::FromStr, sync::OnceLock};
+use std::{net::Ipv4Addr, time::Duration, error::Error, path::Path, fs::File, io, str::FromStr};
 
 use dnx_rs::{Tree, TreeSortable};
 use hickory_server::{server::{RequestHandler, ResponseHandler, Request, ResponseInfo}, proto::{op::{Header, ResponseCode, OpCode}, rr::LowerName}, ServerFuture, authority::MessageResponseBuilder};
@@ -7,13 +7,27 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
-static DOMAIN_TREE: OnceLock<Tree<String,DnxEntry>> = OnceLock::new();
-
-static DEFAULT_SERVER: OnceLock<DnxEntry> = OnceLock::new();
-
-struct DnxRequestHandler;
+struct DnxRequestHandler {
+    tree: Tree<String, DnxEntry>,
+    default_server: DnxEntry,
+}
 
 impl DnxRequestHandler {
+    fn from_config(config: DnxConfig) -> Self{
+        let mut tree = Tree::new();
+        config.zones.iter().for_each(|entry| {
+            tree.insert(entry.clone());
+        });
+
+        Self {
+            tree,
+            default_server: DnxEntry {
+                zone: "".to_string(),
+                server: config.default_server,
+                nat: None,
+            },
+        }
+    }
     async fn do_handle_request<R: ResponseHandler>(
         &self,
         request: &Request,
@@ -24,8 +38,7 @@ impl DnxRequestHandler {
 
         match request.op_code() {
             OpCode::Query => {
-                let tree = DOMAIN_TREE.get().unwrap();
-                let entry = tree.find(request.query().name()).unwrap_or_else(|| DEFAULT_SERVER.get().unwrap());
+                let entry = self.tree.find(request.query().name()).unwrap_or(&self.default_server);
             }
             _ => ()
         }
@@ -63,7 +76,7 @@ struct DnxEntry {
     nat: Option<DnxNatEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct DnxConfig {
     pub zones: Vec<DnxEntry>,
     pub tcp_port: u16,
@@ -157,18 +170,6 @@ fn load_config() -> DnxConfig {
         config
     });
 
-    let mut tree = Tree::new();
-    config.zones.iter().for_each(|entry| {
-        tree.insert(entry.clone());
-    });
-
-    _ = DOMAIN_TREE.set(tree);
-    _ = DEFAULT_SERVER.set(DnxEntry{
-        zone: "".to_string(),
-        server: config.default_server,
-        nat: None,
-    });
-
     config
 }
 
@@ -176,7 +177,7 @@ fn load_config() -> DnxConfig {
 async fn main() {
     let config = load_config();
 
-    let mut server = ServerFuture::new(DnxRequestHandler);
+    let mut server = ServerFuture::new(DnxRequestHandler::from_config(config.clone()));
 
     let udp_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, config.udp_port)).await.unwrap();
     let tcp_socket = TcpListener::bind((Ipv4Addr::UNSPECIFIED, config.tcp_port)).await.unwrap();
