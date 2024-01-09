@@ -31,8 +31,8 @@ where
         }
     }
 
-    pub fn insert(&mut self, value: T) {
-        self.root.add_child(value, None);
+    pub fn insert(&mut self, value: T) -> Option<T> {
+        self.root.add_child(value, None)
     }
 
     pub fn find<U>(&self, path: U) -> Option<&T>
