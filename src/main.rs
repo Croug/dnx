@@ -1,15 +1,65 @@
-use std::{net::Ipv4Addr, time::Duration, error::Error, path::Path, fs::File, io, str::FromStr};
+use std::{
+    net::Ipv4Addr,
+    time::Duration,
+    error::Error,
+    path::Path,
+    fs::File,
+    io,
+    str::FromStr,
+    collections::HashMap,
+};
 
-use dnx_rs::{Tree, TreeSortable};
-use hickory_server::{server::{RequestHandler, ResponseHandler, Request, ResponseInfo}, proto::{op::{Header, ResponseCode, OpCode}, rr::LowerName}, ServerFuture, authority::MessageResponseBuilder};
-use tokio::net::{UdpSocket, TcpListener};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use dnx_rs::{
+    Tree,
+    TreeSortable,
+};
+
+use hickory_server::{
+    server::{
+        RequestHandler,
+        ResponseHandler,
+        Request,
+        ResponseInfo,
+    },
+    proto::{
+        op::{
+            Header,
+            ResponseCode,
+            OpCode,
+        },
+        rr::LowerName,
+    },
+    ServerFuture,
+    authority::MessageResponseBuilder,
+};
+
+use hickory_resolver::{
+    TokioAsyncResolver,
+    config::{
+        ResolverConfig,
+        ResolverOpts,
+        NameServerConfig,
+        Protocol,
+    },
+};
+
+use tokio::{net::{
+    UdpSocket,
+    TcpListener,
+}, sync::RwLock};
+
+use serde::{
+    de::DeserializeOwned,
+    Deserialize,
+    Serialize,
+};
 
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct DnxRequestHandler {
     tree: Tree<String, DnxEntry>,
     default_server: DnxEntry,
+    resolvers: RwLock<HashMap<String, TokioAsyncResolver>>,
 }
 
 impl DnxRequestHandler {
@@ -26,6 +76,7 @@ impl DnxRequestHandler {
                 server: config.default_server,
                 nat: None,
             },
+            resolvers: RwLock::new(HashMap::new()),
         }
     }
     async fn do_handle_request<R: ResponseHandler>(
@@ -36,14 +87,40 @@ impl DnxRequestHandler {
         let builder = MessageResponseBuilder::from_message_request(request);
         let mut header = Header::response_from_request(request.header());
 
-        match request.op_code() {
+        Ok(match request.op_code() {
             OpCode::Query => {
-                let entry = self.tree.find(request.query().name()).unwrap_or(&self.default_server);
+                let query = request.query();
+                let name = query.name();
+                let entry = self.tree.find(name).unwrap_or(&self.default_server);
+                let resolver = self.get_resolver(entry).await;
+                let upstream_response = resolver.lookup(name, query.query_type()).await?;
+                let response = builder.build(header, upstream_response.record_iter(), &[], &[], &[]);
+                response_handle.send_response(response).await?
             }
-            _ => ()
-        }
+            _ => {
+                header.set_response_code(ResponseCode::NotImp);
+                let response = builder.build(header, &[], &[], &[], &[]);
+                response_handle.send_response(response).await?
+            }
+        })
+    }
+    async fn get_resolver(&self, entry: &DnxEntry) -> TokioAsyncResolver {
+        let resolver = {
+            self.resolvers.read().await.get(&entry.zone).cloned()
+        };
+    
+        match resolver {
+            Some(resolver) => resolver,
+            None => {
+                let options = ResolverOpts::default();
 
-        todo!()
+                let mut config = ResolverConfig::default();
+                config.add_name_server(NameServerConfig::new((entry.server, 53).into(), Protocol::Udp));
+
+                let resolver = TokioAsyncResolver::tokio(config, options);
+                self.resolvers.write().await.entry(entry.zone.clone()).or_insert(resolver).clone()
+            }
+        }
     }
 }
 
