@@ -40,7 +40,7 @@ use hickory_resolver::{
         ResolverOpts,
         NameServerConfig,
         Protocol,
-    },
+    }, proto::rr::{Record, RecordType, RData},
 };
 
 use tokio::{net::{
@@ -92,9 +92,36 @@ impl DnxRequestHandler {
                 let query = request.query();
                 let name = query.name();
                 let entry = self.tree.find(name).unwrap_or(&self.default_server);
+                log::trace!("Found entry: {:?}", entry);
                 let resolver = self.get_resolver(entry).await;
                 let upstream_response = resolver.lookup(name, query.query_type()).await?;
-                let response = builder.build(header, upstream_response.record_iter(), &[], &[], &[]);
+                let records: Vec<Record> = upstream_response.record_iter().map(|record| {
+                    match record.record_type() {
+                        RecordType::A => {
+                            let parts = record.clone().into_parts();
+                            let rdata = parts.rdata.unwrap();
+                        
+                            let ip = if let RData::A(ip) = rdata {
+                                ip
+                            } else {
+                                panic!("Expected A record");
+                            };
+                        
+                            let ip = entry.translate(ip.into());
+                        
+                            let mut record = Record::new();
+                            record.set_record_type(parts.rr_type);
+                            record.set_data(Some(RData::A(ip.into())));
+                            record.set_dns_class(parts.dns_class);
+                            record.set_name(parts.name_labels);
+                            record.set_ttl(parts.ttl);
+
+                            record
+                        }
+                        _ => record.clone(),
+                    }
+                }).collect();
+                let response = builder.build(header, records.iter(), &[], &[], &[]);
                 response_handle.send_response(response).await?
             }
             _ => {
@@ -110,8 +137,12 @@ impl DnxRequestHandler {
         };
     
         match resolver {
-            Some(resolver) => resolver,
+            Some(resolver) => {
+                log::trace!("Using cached resolver for zone: {}", entry.zone);
+                resolver
+            }
             None => {
+                log::debug!("Creating resolver for zone: {}", entry.zone);
                 let options = ResolverOpts::default();
 
                 let mut config = ResolverConfig::default();
@@ -139,21 +170,21 @@ impl RequestHandler for DnxRequestHandler {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct DnxNatEntry {
     ip_original: Ipv4Addr,
     ip_translation: Ipv4Addr,
     mask: Ipv4Addr,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct DnxEntry {
     zone: String,
     server: Ipv4Addr,
     nat: Option<DnxNatEntry>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct DnxConfig {
     pub zones: Vec<DnxEntry>,
     pub tcp_port: u16,
@@ -193,11 +224,6 @@ impl DnxNatEntry {
 }
 
 impl DnxEntry {
-    fn matches(&self, name: &LowerName) -> bool {
-        let zone = LowerName::from_str(&self.zone).unwrap();
-        zone.zone_of(name)
-    }
-
     fn translate(&self, ip: Ipv4Addr) -> Ipv4Addr {
         match self.nat {
             None => ip,
@@ -252,6 +278,8 @@ fn load_config() -> DnxConfig {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let config = load_config();
 
     let mut server = ServerFuture::new(DnxRequestHandler::from_config(config.clone()));
@@ -297,18 +325,6 @@ mod tests {
             nat_entry.translate(Ipv4Addr::new(10, 0, 0, 1)),
             Ipv4Addr::new(10, 0, 0, 1)
         );
-    }
-
-    #[test]
-    fn test_dnx_entry_matches() {
-        let dnx_entry = DnxEntry {
-            zone: "example.com".to_string(),
-            server: Ipv4Addr::new(192, 168, 0, 1),
-            nat: None,
-        };
-
-        assert!(dnx_entry.matches(&LowerName::from_str("my.subdomain.example.com").unwrap()));
-        assert!(!dnx_entry.matches(&LowerName::from_str("my.subdomain.example.org").unwrap()));
     }
 
     #[test]
