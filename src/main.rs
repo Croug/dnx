@@ -94,7 +94,9 @@ impl DnxRequestHandler {
                 let entry = self.tree.find(name).unwrap_or(&self.default_server);
                 log::trace!("Found entry: {:?}", entry);
                 let resolver = self.get_resolver(entry).await;
+                log::trace!("Starting lookup for: {}", name);
                 let upstream_response = resolver.lookup(name, query.query_type()).await?;
+                log::trace!("Got upstream response: {:?}", upstream_response);
                 let records: Vec<Record> = upstream_response.record_iter().map(|record| {
                     match record.record_type() {
                         RecordType::A => {
@@ -104,7 +106,7 @@ impl DnxRequestHandler {
                             let ip = if let RData::A(ip) = rdata {
                                 ip
                             } else {
-                                panic!("Expected A record");
+                                panic!("Non A Record RData in A Record");
                             };
                         
                             let ip = entry.translate(ip.into());
@@ -145,8 +147,8 @@ impl DnxRequestHandler {
                 log::debug!("Creating resolver for zone: {}", entry.zone);
                 let options = ResolverOpts::default();
 
-                let mut config = ResolverConfig::default();
-                config.add_name_server(NameServerConfig::new((entry.server, 53).into(), Protocol::Udp));
+                let nameservers = vec![NameServerConfig::new((entry.server, 53).into(), Protocol::Udp)];
+                let config = ResolverConfig::from_parts(None, vec![], nameservers);
 
                 let resolver = TokioAsyncResolver::tokio(config, options);
                 self.resolvers.write().await.entry(entry.zone.clone()).or_insert(resolver).clone()
