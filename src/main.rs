@@ -5,7 +5,6 @@ use std::{
     path::Path,
     fs::File,
     io,
-    str::FromStr,
     collections::HashMap,
 };
 
@@ -21,13 +20,10 @@ use hickory_server::{
         Request,
         ResponseInfo,
     },
-    proto::{
-        op::{
-            Header,
-            ResponseCode,
-            OpCode,
-        },
-        rr::LowerName,
+    proto::op::{
+        Header,
+        ResponseCode,
+        OpCode,
     },
     ServerFuture,
     authority::MessageResponseBuilder,
@@ -278,10 +274,7 @@ fn load_config() -> DnxConfig {
     config
 }
 
-#[tokio::main]
-async fn main() {
-    env_logger::init();
-
+async fn setup_server() -> io::Result<ServerFuture<DnxRequestHandler>> {
     let config = load_config();
 
     let mut server = ServerFuture::new(DnxRequestHandler::from_config(config.clone()));
@@ -292,7 +285,20 @@ async fn main() {
     server.register_socket(udp_socket);
     server.register_listener(tcp_socket, TCP_TIMEOUT);
 
-    let _ = server.block_until_done().await;
+    Ok(server)
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+
+    let mut server = setup_server().await.unwrap();
+
+    tokio::signal::ctrl_c().await.unwrap();
+
+    server.shutdown_gracefully().await.expect("Failed to shutdown gracefully");
+
+    println!("Goodbye!");
 }
 
 #[cfg(test)]
