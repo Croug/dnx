@@ -288,7 +288,7 @@ fn load_config() -> DnxConfig {
     let config = load_json(&path).unwrap_or_else(|_| {
         let mut config = DnxConfig::default();
         config.zones.push(DnxEntry{
-            zone: "example.com".to_string(),
+            zone: "example.com.".to_string(),
             server: Ipv4Addr::new(192, 168, 0, 1),
             nat: Some(DnxNatEntry {
                 ip_original: Ipv4Addr::new(192, 168, 0, 0),
