@@ -54,7 +54,7 @@ fn service_main(_: Vec<OsString>) {
 }
 
 fn main() -> Result<(), windows_service::Error> {
-    let status_handle = service_dispatcher::start("DnxHostService", ffi_service_main)?;
+    service_dispatcher::start("DnxHostService", ffi_service_main)?;
 
     Ok(())
 }
