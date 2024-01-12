@@ -1,4 +1,6 @@
-use std::{ffi::OsString, sync::{Arc, atomic::AtomicBool}, time::Duration};
+use std::panic;
+use std::{ffi::OsString, sync::{Arc, atomic::AtomicBool}, time::Duration, error::Error};
+use tokio::runtime::Runtime;
 use windows_service::{
     define_windows_service,
     service_dispatcher,
@@ -34,7 +36,9 @@ fn service_main(_: Vec<OsString>) {
         }
     }).expect("Failed to register service control handler");
 
-    tokio::spawn(async move {
+    let rt = Runtime::new().unwrap();
+
+    rt.block_on(async move {
         log::info!("Starting DNX server");
         let mut server = dnx_rs::server::setup_server().await.unwrap();
         log::info!("DNX server started");
@@ -53,7 +57,16 @@ fn service_main(_: Vec<OsString>) {
     });
 }
 
-fn main() -> Result<(), windows_service::Error> {
+fn setup_logging() {
+    simple_logging::log_to_file("C:\\ProgramData\\dnx\\dnx.log", log::LevelFilter::Debug).unwrap();
+    panic::set_hook(Box::new(|panic_info| {
+        log::error!("Panic occurred: {panic_info:?}");
+    }));
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // setup_logging();
+
     service_dispatcher::start("DnxHostService", ffi_service_main)?;
 
     Ok(())
