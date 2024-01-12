@@ -262,11 +262,28 @@ fn load_json<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> io::Result<T> {
     Ok(data)
 }
 
-fn load_config() -> DnxConfig {
+#[cfg(windows)]
+fn get_config_path() -> PathBuf {
     let program_data = env::var("ProgramData").expect("ProgramData environment variable not set");
+    
     let mut path = PathBuf::from(program_data);
     path.push("dnx");
     path.push("dnx.json");
+
+    path
+}
+
+#[cfg(not(windows))]
+fn get_config_path() -> PathBuf {
+    let mut path = PathBuf::from("/etc");
+    path.push("dnx");
+    path.push("dnx.json");
+
+    path
+}
+
+fn load_config() -> DnxConfig {
+    let path = get_config_path();
 
     let config = load_json(&path).unwrap_or_else(|_| {
         let mut config = DnxConfig::default();
