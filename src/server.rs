@@ -2,10 +2,10 @@ use std::{
     net::Ipv4Addr,
     time::Duration,
     error::Error,
-    path::Path,
-    fs::File,
+    path::{Path, PathBuf},
+    fs::{File, self},
     io,
-    collections::HashMap,
+    collections::HashMap, env,
 };
 
 use crate::tree::{
@@ -244,10 +244,17 @@ impl Default for DnxConfig {
 }
 
 fn save_json<T: Serialize, P: AsRef<Path>>(data: &T, path: P) -> io::Result<()> {
+    let path = path.as_ref();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, data)?;
     Ok(())
 }
+
 
 fn load_json<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> io::Result<T> {
     let file = File::open(path)?;
@@ -256,7 +263,12 @@ fn load_json<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> io::Result<T> {
 }
 
 fn load_config() -> DnxConfig {
-    let config = load_json("dnx.json").unwrap_or_else(|_| {
+    let program_data = env::var("ProgramData").expect("ProgramData environment variable not set");
+    let mut path = PathBuf::from(program_data);
+    path.push("dnx");
+    path.push("dnx.json");
+
+    let config = load_json(&path).unwrap_or_else(|_| {
         let mut config = DnxConfig::default();
         config.zones.push(DnxEntry{
             zone: "example.com".to_string(),
@@ -267,7 +279,7 @@ fn load_config() -> DnxConfig {
                 mask: Ipv4Addr::new(255, 255, 0, 0),
             }),
         });
-        save_json(&config, "dnx.json").unwrap();
+        save_json(&config, &path).unwrap();
         config
     });
 
