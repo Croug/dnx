@@ -78,10 +78,12 @@ impl DnxRequestHandler {
     async fn do_handle_request<R: ResponseHandler>(
         &self,
         request: &Request,
-        mut response_handle: R,
-    ) -> Result<ResponseInfo, Box<dyn Error>> {
+        response_handle: &mut R,
+    ) -> Result<ResponseInfo, Box<dyn Error + Send + Sync>> {
         let builder = MessageResponseBuilder::from_message_request(request);
         let mut header = Header::response_from_request(request.header());
+
+        log::trace!("Handling request: {:?}", request);
 
         Ok(match request.op_code() {
             OpCode::Query => {
@@ -96,6 +98,7 @@ impl DnxRequestHandler {
                 let records: Vec<Record> = upstream_response.record_iter().map(|record| {
                     match record.record_type() {
                         RecordType::A => {
+                            log::trace!("Translating A Record: {:?}", record);
                             let parts = record.clone().into_parts();
                             let rdata = parts.rdata.unwrap();
                         
@@ -120,6 +123,7 @@ impl DnxRequestHandler {
                     }
                 }).collect();
                 let response = builder.build(header, records.iter(), &[], &[], &[]);
+                log::trace!("Sending response: {:?}", response);
                 response_handle.send_response(response).await?
             }
             _ => {
@@ -155,14 +159,22 @@ impl DnxRequestHandler {
 
 #[async_trait::async_trait]
 impl RequestHandler for DnxRequestHandler {
-    async fn handle_request<R: ResponseHandler>(&self, request: &Request, response_handle: R) -> ResponseInfo {
-        match self.do_handle_request(request, response_handle).await {
+    async fn handle_request<R: ResponseHandler>(&self, request: &Request, mut response_handle: R) -> ResponseInfo {
+        match self.do_handle_request(request, &mut response_handle).await {
             Ok(info) => info,
             Err(e) => {
-                eprintln!("Error handling request: {}", e);
-                let mut header = Header::new();
+                log::warn!("Error handling request: {e}");
+
+                let builder = MessageResponseBuilder::from_message_request(request);
+                let mut header = Header::response_from_request(request.header());
                 header.set_response_code(ResponseCode::ServFail);
-                header.into()
+
+                let response = builder.build(header, &[], &[], &[], &[]);
+
+                match response_handle.send_response(response).await {
+                    Ok(info) => info,
+                    Err(_) => header.into(),
+                }
             }
         }
     }
@@ -285,7 +297,8 @@ fn get_config_path() -> PathBuf {
 fn load_config() -> DnxConfig {
     let path = get_config_path();
 
-    let config = load_json(&path).unwrap_or_else(|_| {
+    let config = load_json(&path).unwrap_or_else(|e| {
+        log::warn!("Failed to load config: {}. Using default config and saving it to disk.", e);
         let mut config = DnxConfig::default();
         config.zones.push(DnxEntry{
             zone: "example.com.".to_string(),
