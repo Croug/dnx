@@ -30,13 +30,9 @@ use hickory_server::{
 };
 
 use hickory_resolver::{
-    TokioAsyncResolver,
-    config::{
-        ResolverConfig,
-        ResolverOpts,
-        NameServerConfig,
-        Protocol,
-    }, proto::rr::{Record, RecordType, RData},
+    TokioAsyncResolver, config::{
+        NameServerConfig, Protocol, ResolverConfig, ResolverOpts
+    }, error::{ResolveError, ResolveErrorKind}, proto::rr::{RData, Record, RecordType}
 };
 
 use tokio::{net::{
@@ -95,6 +91,10 @@ impl DnxRequestHandler {
                 log::trace!("Starting lookup for: {}", name);
                 let upstream_response = resolver.lookup(name, query.query_type()).await?;
                 log::trace!("Got upstream response: {:?}", upstream_response);
+                
+                // Preserve upstream flags: recursion available and valid response
+                header.set_recursion_available(true);
+                
                 let records: Vec<Record> = upstream_response.record_iter().map(|record| {
                     match record.record_type() {
                         RecordType::A => {
@@ -157,17 +157,33 @@ impl DnxRequestHandler {
     }
 }
 
+fn rcode_from_error(error: &ResolveError) -> ResponseCode {
+    match error.kind() {
+        ResolveErrorKind::NoRecordsFound { response_code, ..  } => *response_code,
+        _ => ResponseCode::ServFail,
+    }
+}
+
 #[async_trait::async_trait]
 impl RequestHandler for DnxRequestHandler {
     async fn handle_request<R: ResponseHandler>(&self, request: &Request, mut response_handle: R) -> ResponseInfo {
         match self.do_handle_request(request, &mut response_handle).await {
             Ok(info) => info,
             Err(e) => {
-                log::warn!("Error handling request: {e}");
+                let rcode = match e.downcast_ref::<ResolveError>() {
+                    Some(resolve_error) => rcode_from_error(resolve_error),
+                    None => ResponseCode::ServFail,
+                };
+
+                if matches!(rcode, ResponseCode::ServFail) {
+                    log::error!("Error handling request: {e}");
+                } else {
+                    log::trace!("No records found for request: {e} - {rcode:?}");
+                }
 
                 let builder = MessageResponseBuilder::from_message_request(request);
                 let mut header = Header::response_from_request(request.header());
-                header.set_response_code(ResponseCode::ServFail);
+                header.set_response_code(rcode);
 
                 let response = builder.build(header, &[], &[], &[], &[]);
 
