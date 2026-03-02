@@ -1,6 +1,8 @@
 use std::panic;
-use std::{ffi::OsString, sync::{Arc, atomic::AtomicBool}, time::Duration, error::Error};
+use std::sync::Mutex;
+use std::{ffi::OsString, sync::Arc, time::Duration, error::Error};
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 use windows_service::{
     define_windows_service,
     service_dispatcher,
@@ -23,14 +25,16 @@ fn update_status(current_state: ServiceState, status_handle: &ServiceStatusHandl
 }
 
 fn service_main(_: Vec<OsString>) {
-    let signal = Arc::new(AtomicBool::new(false));
-    let signal_dup = signal.clone();
+    let (tx, rx) = oneshot::channel();
+    let tx = Arc::new(Mutex::new(Some(tx)));
     let status_handle = service_control_handler::register("DnxHostService", move |event| {
         match event {
             ServiceControl::Stop => {
-                signal_dup.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
                 ServiceControlHandlerResult::NoError
-            }
+            },
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }
@@ -46,7 +50,7 @@ fn service_main(_: Vec<OsString>) {
         update_status(ServiceState::Running, &status_handle)
             .expect("failed to update service status");
 
-        while !signal.load(std::sync::atomic::Ordering::Relaxed) { }
+        rx.await.ok();
         log::info!("Shutting down DNX server");
 
         server.shutdown_gracefully().await.expect("Failed to shutdown gracefully");
@@ -65,7 +69,8 @@ fn setup_logging() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // setup_logging();
+    setup_logging();
+    log::set_max_level(log::LevelFilter::Trace);
 
     service_dispatcher::start("DnxHostService", ffi_service_main)?;
 
