@@ -70,7 +70,6 @@ fn setup_logging() {
 
 fn main() -> Result<(), Box<dyn Error>> {
     setup_logging();
-    log::set_max_level(log::LevelFilter::Trace);
 
     service_dispatcher::start("DnxHostService", ffi_service_main)?;
 
